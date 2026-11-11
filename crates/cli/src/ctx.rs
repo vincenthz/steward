@@ -5,7 +5,7 @@ use std::cell::OnceCell;
 use steward_gitcache::{Auth, Cache, Remote};
 use steward_github::{Client, RepoRef, Token, auth};
 
-use crate::config::Config;
+use crate::config::{Config, Protocol};
 
 pub struct Ctx {
     pub cfg: Config,
@@ -37,8 +37,9 @@ impl Ctx {
             .get_or_init(|| Client::new(self.cfg.api(), self.token().cloned()))
     }
 
+    /// The bare repositories, at `<cache>/<host>/<owner>/<name>`
     pub fn cache(&self) -> Cache {
-        Cache::new(self.cfg.git_dir())
+        Cache::new(self.cfg.cache_dir())
     }
 
     /// The cache key of a repository: `host/owner/name`
@@ -49,6 +50,18 @@ impl Ctx {
     pub fn git_auth(&self) -> Option<Auth> {
         self.token()
             .map(|t| Auth::github_token(self.host(), t.secret()))
+    }
+
+    /// How clones reach the host: `git.protocol` in the configuration, else
+    /// gh's `git_protocol`, else https
+    pub fn protocol(&self) -> Protocol {
+        let host = self.host();
+        self.cfg.git.protocol.get(host).copied().unwrap_or_else(|| {
+            match auth::git_protocol(host).as_deref() {
+                Some("ssh") => Protocol::Ssh,
+                _ => Protocol::Https,
+            }
+        })
     }
 
     pub fn remote(&self, repo: &RepoRef) -> Remote {

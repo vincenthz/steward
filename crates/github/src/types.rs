@@ -32,6 +32,7 @@ pub struct Repository {
     pub fork: bool,
     pub html_url: String,
     pub clone_url: String,
+    pub ssh_url: String,
     pub open_issues_count: u64,
     pub stargazers_count: u64,
     pub language: Option<String>,

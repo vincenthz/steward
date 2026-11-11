@@ -1,12 +1,12 @@
-//! A cache of git repositories, kept as bare clones (`<root>/<host>/<owner>/<name>.git`)
-//! and checked out as worktrees, so that working on a repository again only
-//! fetches what changed, and several checkouts share one object store.
+//! A cache of git repositories, kept as bare clones (`<root>/<host>/<owner>/<name>`),
+//! so that working on a repository again only fetches what changed. Working
+//! copies are local clones of a cached repository (their objects hardlinked
+//! when on the same file system), or worktrees of it.
 //!
 //! It runs the `git` command. Credentials go through the environment
 //! (`GIT_CONFIG_*`), never through the command line nor the repository's
 //! configuration, and git never prompts.
 
-use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -75,7 +75,7 @@ impl fmt::Debug for Auth {
 #[derive(Debug, Clone)]
 pub struct Remote {
     pub url: String,
-    /// relative path in the cache, without `.git`: `github.com/owner/name`
+    /// the path in the cache: `host/owner/name`
     pub key: String,
     pub auth: Option<Auth>,
 }
@@ -91,12 +91,27 @@ pub struct Bare {
     pub path: PathBuf,
 }
 
+/// `host/owner/name`
 fn valid_key(key: &str) -> bool {
-    !key.is_empty()
-        && !key.starts_with('/')
-        && key
-            .split('/')
-            .all(|s| !s.is_empty() && s != "." && s != ".." && !s.starts_with('-'))
+    let segments: Vec<&str> = key.split('/').collect();
+    segments.len() == 3
+        && segments
+            .iter()
+            .all(|s| !s.is_empty() && *s != "." && *s != ".." && !s.starts_with('-'))
+}
+
+/// A bare repository, not one being cloned
+fn is_bare(path: &Path) -> bool {
+    path.join("HEAD").is_file() && path.join("objects").is_dir()
+}
+
+/// `dir/.name.suffix`: next to a repository, out of the way of the others
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .expect("a key has a name")
+        .to_string_lossy();
+    path.with_file_name(format!(".{name}.{suffix}"))
 }
 
 impl Cache {
@@ -112,13 +127,13 @@ impl Cache {
         if !valid_key(key) {
             return Err(Error::InvalidKey(key.into()));
         }
-        Ok(self.root.join(format!("{key}.git")))
+        Ok(self.root.join(key))
     }
 
     /// The repository, if cached
     pub fn get(&self, key: &str) -> Result<Option<Bare>, Error> {
         let path = self.path_of(key)?;
-        Ok(path.join("HEAD").is_file().then(|| Bare {
+        Ok(is_bare(&path).then(|| Bare {
             key: key.into(),
             path,
         }))
@@ -133,13 +148,13 @@ impl Cache {
             key: remote.key.clone(),
             path: path.clone(),
         };
-        if path.join("HEAD").is_file() {
+        if is_bare(&path) {
             bare.fetch(remote.auth.as_ref(), &[])?;
             return Ok(bare);
         }
         // clone next to it and move it in place, so that an interrupted clone
         // never looks like a repository
-        let tmp = path.with_extension("git.partial");
+        let tmp = beside(&path, "partial");
         if tmp.exists() {
             fs::remove_dir_all(&tmp)?;
         }
@@ -174,29 +189,28 @@ impl Cache {
 
     /// Every cached repository
     pub fn list(&self) -> Result<Vec<Bare>, Error> {
+        fn dirs(dir: &Path) -> Vec<(String, PathBuf)> {
+            let Ok(rd) = fs::read_dir(dir) else {
+                return Vec::new();
+            };
+            rd.flatten()
+                .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+                .filter(|(_, p)| p.is_dir())
+                .collect()
+        }
         let mut out = Vec::new();
-        if self.root.is_dir() {
-            self.walk(&self.root, &mut out)?;
+        for (host, h) in dirs(&self.root) {
+            for (owner, o) in dirs(&h) {
+                for (name, path) in dirs(&o) {
+                    let key = format!("{host}/{owner}/{name}");
+                    if valid_key(&key) && is_bare(&path) {
+                        out.push(Bare { key, path });
+                    }
+                }
+            }
         }
         out.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(out)
-    }
-
-    fn walk(&self, dir: &Path, out: &mut Vec<Bare>) -> Result<(), Error> {
-        for entry in fs::read_dir(dir)? {
-            let path = entry?.path();
-            if !path.is_dir() {
-                continue;
-            }
-            if path.extension() == Some(OsStr::new("git")) && path.join("HEAD").is_file() {
-                let rel = path.strip_prefix(&self.root).expect("under the root");
-                let key = rel.with_extension("").to_string_lossy().replace('\\', "/");
-                out.push(Bare { key, path });
-            } else if path.extension() != Some(OsStr::new("partial")) {
-                self.walk(&path, out)?;
-            }
-        }
-        Ok(())
     }
 
     /// Removes a repository from the cache, with its worktrees' records
@@ -218,7 +232,7 @@ fn lock(repo: &Path) -> Result<File, Error> {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(repo.with_extension("git.lock"))?;
+        .open(beside(repo, "lock"))?;
     file.lock()?;
     Ok(file)
 }
@@ -262,7 +276,36 @@ fn run(mut cmd: Command) -> Result<String, Error> {
     }
 }
 
+/// A working copy: a clone or a worktree
+#[derive(Debug, Clone)]
+pub struct Work {
+    pub path: PathBuf,
+}
+
+impl Work {
+    /// Runs git in the working copy
+    pub fn git(&self, args: &[&str]) -> Result<String, Error> {
+        let mut cmd = git(None, None);
+        cmd.arg("-C").arg(&self.path).args(args);
+        run(cmd)
+    }
+}
+
 impl Bare {
+    /// Clones the repository to `dest`, which must not exist or be empty:
+    /// a plain clone whose `origin` is this repository (point it upstream
+    /// with `git remote set-url`), its objects hardlinked when possible
+    pub fn clone_to(&self, dest: &Path) -> Result<Work, Error> {
+        let mut cmd = git(None, None);
+        cmd.args(["clone", "--quiet", "--"])
+            .arg(&self.path)
+            .arg(dest);
+        run(cmd)?;
+        Ok(Work {
+            path: dest.to_path_buf(),
+        })
+    }
+
     /// Runs git in this repository
     pub fn git(&self, args: &[&str]) -> Result<String, Error> {
         let mut cmd = git(Some(&self.path), None);
@@ -408,7 +451,8 @@ mod tests {
     #[test]
     fn keys() {
         assert!(valid_key("github.com/o/r"));
-        for k in ["", "/abs", "a/../b", "a//b", "-x/y"] {
+        assert!(valid_key("github.com/o/.github"));
+        for k in ["", "/abs/b", "a/../b", "a//b", "-x/y/z", "o/r", "h/o/r/x"] {
             assert!(!valid_key(k), "{k}");
         }
     }
@@ -440,6 +484,23 @@ mod tests {
         let second = bare.rev_parse("trunk").unwrap();
         assert_ne!(first, second);
         assert_eq!(bare.rev_parse("v2").unwrap(), second);
+
+        assert!(d.join("cache/local/o/r/HEAD").is_file());
+        let work = bare.clone_to(&d.join("clone")).unwrap();
+        assert_eq!(fs::read_to_string(work.path.join("a")).unwrap(), "2");
+        assert_eq!(work.git(&["rev-parse", "v2"]).unwrap().trim(), second);
+        work.git(&["remote", "set-url", "origin", "https://example.com/o/r.git"])
+            .unwrap();
+        assert_eq!(
+            work.git(&["remote", "get-url", "origin"]).unwrap().trim(),
+            "https://example.com/o/r.git"
+        );
+        assert_eq!(
+            work.git(&["rev-parse", "--abbrev-ref", "@{upstream}"])
+                .unwrap()
+                .trim(),
+            "origin/trunk"
+        );
 
         let wt = d.join("wt");
         bare.add_worktree(&wt, &first, None).unwrap();

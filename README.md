@@ -13,8 +13,8 @@ steward issue triage rust-lang/rustlings#2200          # classify, prioritise, c
 steward issue triage rust-lang/rustlings#2200 --apply  # and add the labels
 steward pr review https://github.com/o/r/pull/12       # print a review
 steward pr review o/r#12 --post                        # and post it (as a comment, never an approval)
-steward repo checkout o/r --pr 12                      # worktree of the PR head, from the cache
-steward sandbox run -C <checkout> -- cargo test        # run its tests confined
+steward repo checkout o/r --pr 12                      # ./r on the PR's branch, cloned through the cache
+steward sandbox run -C r -- cargo test                 # run its tests confined
 ```
 
 ## Commands
@@ -31,9 +31,9 @@ steward sandbox run -C <checkout> -- cargo test        # run its tests confined
 | `pr review ITEM [--post]` | **model**: summary, issues by severity with `file:line`, suggestions |
 | `pr create REPO --head B [--base B] -t TITLE [-m BODY] [--draft]` | open a PR |
 | `repo sync REPO...` | clone into the cache, or fetch |
-| `repo list [-v]` | cached repositories, size, last sync, checkouts |
-| `repo checkout REPO [--rev R \| --pr N] [-b BRANCH] [--path P] [--offline]` | a worktree from the cache |
-| `repo discard PATH` / `repo remove REPO` | delete a checkout / a cached repository |
+| `repo list` | cached repositories, size, last sync |
+| `repo checkout REPO [DIR] [--rev R \| --pr N] [-b BRANCH] [--offline]` | a clone in `DIR` (default `./NAME`) through the cache, `origin` on GitHub: see below |
+| `repo remove REPO` | delete a cached repository (clones keep working) |
 | `sandbox check [--dir D]` | the backend and the policy |
 | `sandbox run [-C DIR] [--net] [-w PATH] [-e VAR] [--timeout S] -- CMD...` | a command, confined |
 | `config show` / `config init` | the configuration in effect / write a commented one |
@@ -50,7 +50,7 @@ them together:
 | crate | |
 |---|---|
 | `steward-github` | blocking REST client (ureq, rustls): issues, comments, labels, PRs, diffs, reviews, pagination, API errors and rate limits. Token discovery: `$STEWARD_GITHUB_TOKEN`, `$GH_TOKEN`/`$GITHUB_TOKEN` (`$GH_ENTERPRISE_TOKEN` for other hosts), the config, then what `gh auth login` stored: `hosts.yml` or the system keyring (`security` on macOS, `secret-tool` on Linux, go-keyring encodings decoded). No `gh` process. |
-| `steward-gitcache` | bare clones at `<cache>/git/<host>/<owner>/<name>.git` mirroring branches and tags, PR heads fetched on demand to `refs/pull/N/head`, worktrees for checkouts. Clones land atomically (cloned aside, then renamed), a file lock serializes processes per repository, git never prompts, and the token goes to git through `GIT_CONFIG_*` environment variables: never on the command line or in the repository's config. |
+| `steward-gitcache` | bare clones at `<cache>/<host>/<owner>/<name>` mirroring branches and tags, PR heads fetched on demand to `refs/pull/N/head`; local clones and worktrees from them. Clones land atomically (cloned aside, then renamed), a file lock serializes processes per repository, git never prompts, and the token goes to git through `GIT_CONFIG_*` environment variables: never on the command line or in the repository's config. |
 | `steward-sandbox` | Seatbelt (`sandbox-exec`) on macOS, bubblewrap on Linux. Default policy: writes only to the working directory and a private `$TMPDIR`; no IP network; `~/.ssh`, `~/.config/gh`, cloud and registry credentials, keychains unreadable; the environment cleared to a basic set (so `GH_TOKEN` and friends never reach the command). Captured runs have a timeout that kills the whole process group. |
 | `steward-brain` | biv behind a small API: `with_brain(cfg, \|brain\| ...)` loads the model once; `ask` (text), `call` (the answer as a function call, for structure, reminded once if the model doesn't call), `conversation` (multi-turn, tool results: the base for agent loops). A thinking budget stops runaway reasoning and asks for the answer with thinking off. |
 | `steward` | the commands, the config (`~/.config/steward/config.toml`), the prompts. |
@@ -68,8 +68,33 @@ Principles kept so far:
   see. Lockfiles and minified files are left out of reviewed diffs.
 
 Paths: config `$STEWARD_CONFIG_DIR` or `$XDG_CONFIG_HOME/steward` or
-`~/.config/steward`; cache (`git/`, `work/`, `sandbox/`) `cache.dir` or
-`$XDG_CACHE_HOME/steward` or `~/.cache/steward`.
+`~/.config/steward`; cache (`<host>/<owner>/<name>` repositories,
+`sandbox/`) `cache.dir` or `$XDG_CACHE_HOME/steward` or `~/.cache/steward`.
+
+### Checkouts
+
+`repo checkout` syncs the cached repository, then clones it like `git clone`
+would, from the cache: objects are hardlinked (same file system), so it is
+quick and the clone doesn't depend on the cache afterwards. `origin` is then
+set to the repository on GitHub, over ssh or https as configured for the
+host (else gh's `git_protocol`, else https), so fetch, pull and push are plain git with your
+own credentials; steward's token is never written to the clone.
+
+```toml
+[git.protocol]
+"github.com" = "ssh"
+"github.example.com" = "https"
+```
+
+- no revision: the default branch, tracking `origin`'s
+- `--rev BRANCH`: that branch, tracking `origin`'s; `--rev TAG|COMMIT`:
+  detached; `-b NAME` makes a branch there instead
+- `--pr N`: the PR's head on a branch named like its branch (or `pr-N` if
+  taken, or `-b NAME`), tracking the head branch where it lives: `origin`, or
+  for a fork a remote named after its owner, so `git pull` and `git push`
+  update the PR (pushing to a fork needs "allow edits by maintainers"). If
+  the fork was deleted, or with `--offline`, the branch tracks
+  `refs/pull/N/head`: pull only.
 
 ## Model
 

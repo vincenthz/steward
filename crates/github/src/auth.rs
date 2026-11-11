@@ -85,6 +85,25 @@ pub fn gh_config_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/gh"))
 }
 
+/// How `gh` clones from `host`, `https` or `ssh`: its `git_protocol`, for
+/// the host in hosts.yml, else in config.yml
+pub fn git_protocol(host: &str) -> Option<String> {
+    let dir = gh_config_dir()?;
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
+    read("hosts.yml")
+        .and_then(|t| GhHost::parse(&t, host).git_protocol)
+        .or_else(|| read("config.yml").and_then(|t| scalar(&t, &["git_protocol"])))
+}
+
+/// The value at `path` in a YAML file of `gh`
+fn scalar(text: &str, path: &[&str]) -> Option<String> {
+    yaml_scalars(text)
+        .into_iter()
+        .find(|(p, _)| p.iter().map(String::as_str).eq(path.iter().copied()))
+        .map(|(_, v)| v)
+        .filter(|v| !v.is_empty())
+}
+
 /// The token for `host`: from the environment, then `configured` (steward's
 /// configuration), then `gh`'s hosts.yml, then the keyring
 pub fn discover(host: &str, configured: Option<&str>) -> Option<Token> {
@@ -117,6 +136,7 @@ struct GhHost {
     user: Option<String>,
     /// stored in the file rather than in the keyring
     token: Option<String>,
+    git_protocol: Option<String>,
 }
 
 impl GhHost {
@@ -133,20 +153,17 @@ impl GhHost {
     /// The top `oauth_token` is the active user's, and only present when the
     /// token is not in the keyring.
     fn parse(text: &str, host: &str) -> Self {
-        let entries = yaml_scalars(text);
-        let get = |path: &[&str]| {
-            entries
-                .iter()
-                .find(|(p, _)| p.iter().map(String::as_str).eq(path.iter().copied()))
-                .map(|(_, v)| v.clone())
-                .filter(|v| !v.is_empty())
-        };
+        let get = |path: &[&str]| scalar(text, path);
         let user = get(&[host, "user"]);
         let token = get(&[host, "oauth_token"]).or_else(|| {
             user.as_deref()
                 .and_then(|u| get(&[host, "users", u, "oauth_token"]))
         });
-        GhHost { user, token }
+        GhHost {
+            user,
+            token,
+            git_protocol: get(&[host, "git_protocol"]),
+        }
     }
 }
 
@@ -289,6 +306,7 @@ ghe.example.com:
             GhHost {
                 user: Some("bob".into()),
                 token: Some("gho_bob".into()),
+                git_protocol: Some("https".into()),
             }
         );
         assert_eq!(
@@ -296,6 +314,7 @@ ghe.example.com:
             GhHost {
                 user: Some("carol".into()),
                 token: Some("gho_carol".into()),
+                git_protocol: None,
             }
         );
         assert_eq!(GhHost::parse(HOSTS, "other.com"), GhHost::default());
@@ -311,6 +330,7 @@ ghe.example.com:
             GhHost {
                 user: Some("alice".into()),
                 token: None,
+                git_protocol: Some("ssh".into()),
             }
         );
     }

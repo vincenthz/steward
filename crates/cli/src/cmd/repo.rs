@@ -1,6 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
+use steward_gitcache::{Bare, Work};
+use steward_github::ItemRef;
+
+use crate::config::Protocol;
 use crate::ctx::Ctx;
 use crate::text::{ago_system, bytes};
 use crate::{CheckoutArgs, RepoCmd, Result};
@@ -23,25 +27,18 @@ pub fn repo(ctx: &Ctx, c: RepoCmd) -> Result {
             }
             Ok(())
         }
-        RepoCmd::List { verbose } => {
+        RepoCmd::List => {
             let repos = cache.list()?;
             if repos.is_empty() {
                 println!("no repositories in {}", cache.root().display());
             }
             for b in repos {
-                let worktrees = b.worktrees().unwrap_or_default();
                 println!(
-                    "{:<50} {:>10}  synced {:<10} {} checkout(s)",
+                    "{:<50} {:>10}  synced {}",
                     b.key,
                     bytes(b.disk_size()),
                     b.last_sync().map(ago_system).unwrap_or_default(),
-                    worktrees.len()
                 );
-                if verbose {
-                    for w in worktrees {
-                        println!("    {}", w.display());
-                    }
-                }
             }
             Ok(())
         }
@@ -50,30 +47,9 @@ pub fn repo(ctx: &Ctx, c: RepoCmd) -> Result {
             println!("{}", path.display());
             Ok(())
         }
-        RepoCmd::Discard { path, force } => {
-            let path = path.canonicalize()?;
-            // find the repository owning the worktree
-            for b in cache.list()? {
-                if b.worktrees()?.iter().any(|w| w == &path) {
-                    b.remove_worktree(&path, force)?;
-                    println!("removed {}", path.display());
-                    return Ok(());
-                }
-            }
-            Err(format!("{} is not a checkout of the cache", path.display()).into())
-        }
         RepoCmd::Remove { repo } => {
+            // clones made by `checkout` have their own objects: they stay usable
             let key = ctx.key(&repo);
-            if let Some(b) = cache.get(&key)? {
-                let wt = b.worktrees()?;
-                if !wt.is_empty() {
-                    return Err(format!(
-                        "{key} has {} checkout(s); discard them first (`steward repo list -v`)",
-                        wt.len()
-                    )
-                    .into());
-                }
-            }
             if cache.remove(&key)? {
                 println!("removed {key}");
             } else {
@@ -84,8 +60,27 @@ pub fn repo(ctx: &Ctx, c: RepoCmd) -> Result {
     }
 }
 
-/// A worktree of the revision or pull request, the repository synced first
+/// A pull request's head, and where its branch lives
+struct Head {
+    number: u64,
+    commit: String,
+    /// the branch in the head repository; unknown offline, or when the
+    /// repository was deleted
+    branch: Option<String>,
+    /// the head repository, if a fork: a remote name (its owner) and URL
+    fork: Option<(String, String)>,
+}
+
+/// Clones the repository through the cache (synced first) to `dir` or
+/// `./NAME`, at the revision or pull request, `origin` set to the repository
+/// on GitHub
 pub fn checkout(ctx: &Ctx, a: &CheckoutArgs) -> Result<PathBuf> {
+    for r in [&a.rev, &a.branch].into_iter().flatten() {
+        if r.is_empty() || r.starts_with('-') {
+            return Err(format!("invalid revision or branch `{r}`").into());
+        }
+    }
+    let ssh = ctx.protocol() == Protocol::Ssh;
     let cache = ctx.cache();
     let key = ctx.key(&a.repo);
     let bare = match (cache.get(&key)?, a.offline) {
@@ -93,65 +88,175 @@ pub fn checkout(ctx: &Ctx, a: &CheckoutArgs) -> Result<PathBuf> {
         (None, true) => return Err(format!("{key} is not cached").into()),
         (_, false) => cache.sync(&ctx.remote(&a.repo))?,
     };
-    let (rev, label) = match (&a.pr, &a.rev) {
-        (Some(n), _) => {
-            let commit = if a.offline {
-                bare.rev_parse(&format!("refs/pull/{n}/head"))?
-            } else {
-                bare.fetch_pull(ctx.git_auth().as_ref(), *n)
-                    .map_err(|e| match e {
-                        steward_gitcache::Error::Git { stderr, .. }
-                            if stderr.contains("couldn't find remote ref") =>
-                        {
-                            format!("{}#{n} is not a pull request", a.repo).into()
-                        }
-                        e => Box::<dyn std::error::Error>::from(e),
-                    })?
-            };
-            (commit, format!("pr-{n}"))
-        }
-        (None, Some(r)) => (r.clone(), r.clone()),
-        (None, None) => {
-            let b = bare
-                .default_branch()
-                .ok_or("the repository has no default branch")?;
-            (b.clone(), b)
-        }
+    let head = match a.pr {
+        Some(n) => Some(pull_head(ctx, &bare, a, n, ssh)?),
+        None => None,
     };
-    let path = match &a.path {
-        Some(p) => p.clone(),
-        None => unused(&ctx.cfg.work_dir().join(&key).join(sanitize(&label))),
-    };
-    if path.exists() {
-        return Err(format!("{} exists already", path.display()).into());
+    if let Some(r) = &a.rev
+        && bare.rev_parse(r).is_err()
+    {
+        return Err(format!("{key} has no revision `{r}`").into());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    bare.add_worktree(&path, &rev, a.branch.as_deref())?;
-    Ok(path)
-}
 
-fn sanitize(label: &str) -> String {
-    label
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                c
-            } else {
-                '-'
+    let dest = a.dir.clone().unwrap_or_else(|| PathBuf::from(&a.repo.name));
+    let created = !dest.exists();
+    if !created && (!dest.is_dir() || std::fs::read_dir(&dest)?.next().is_some()) {
+        return Err(format!("{} exists already", dest.display()).into());
+    }
+    let work = bare.clone_to(&dest)?;
+    let upstream = if ssh {
+        a.repo.ssh_url(ctx.host())
+    } else {
+        a.repo.clone_url(ctx.host())
+    };
+    let set_up = match &head {
+        Some(h) => pull_branch(&work, a, h),
+        None => rev_branch(&work, a),
+    }
+    .and_then(|note| {
+        work.git(&["remote", "set-url", "origin", &upstream])?;
+        Ok(note)
+    });
+    match set_up {
+        Ok(note) => {
+            eprintln!("origin {upstream}; {note}");
+            Ok(dest)
+        }
+        Err(e) => {
+            if created {
+                let _ = std::fs::remove_dir_all(&dest);
             }
-        })
-        .collect()
+            Err(e)
+        }
+    }
 }
 
-/// `path`, or `path-2`, `path-3`... the first that doesn't exist
-fn unused(path: &Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
+fn pull_head(ctx: &Ctx, bare: &Bare, a: &CheckoutArgs, n: u64, ssh: bool) -> Result<Head> {
+    if a.offline {
+        let commit = bare
+            .rev_parse(&format!("refs/pull/{n}/head"))
+            .map_err(|_| format!("#{n} is not in the cache; fetch it without --offline"))?;
+        return Ok(Head {
+            number: n,
+            commit,
+            branch: None,
+            fork: None,
+        });
     }
-    (2..)
-        .map(|i| PathBuf::from(format!("{}-{i}", path.display())))
-        .find(|p| !p.exists())
-        .expect("some suffix is free")
+    let pr = ctx.github().pull(&ItemRef {
+        repo: a.repo.clone(),
+        number: n,
+    })?;
+    let commit = bare
+        .fetch_pull(ctx.git_auth().as_ref(), n)
+        .map_err(|e| match e {
+            steward_gitcache::Error::Git { stderr, .. }
+                if stderr.contains("couldn't find remote ref") =>
+            {
+                format!("{}#{n} is not a pull request", a.repo).into()
+            }
+            e => Box::<dyn std::error::Error>::from(e),
+        })?;
+    let base = format!("{}/{}", a.repo.owner, a.repo.name);
+    let (branch, fork) = match &pr.head.repo {
+        None => (None, None),
+        Some(r) if r.full_name.eq_ignore_ascii_case(&base) => (Some(pr.head.branch.clone()), None),
+        Some(r) => {
+            let owner = r
+                .full_name
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let url = if ssh && !r.ssh_url.is_empty() {
+                r.ssh_url.clone()
+            } else {
+                r.clone_url.clone()
+            };
+            (Some(pr.head.branch.clone()), Some((owner, url)))
+        }
+    };
+    Ok(Head {
+        number: n,
+        commit,
+        branch,
+        fork,
+    })
+}
+
+fn has_ref(work: &Work, r: &str) -> bool {
+    work.git(&["rev-parse", "--verify", "--quiet", r]).is_ok()
+}
+
+/// The pull request on a branch tracking its head: the head repository's
+/// branch (a remote added for a fork), so that pull and push go there; else
+/// `refs/pull/N/head`, only pulled
+fn pull_branch(work: &Work, a: &CheckoutArgs, h: &Head) -> Result<String> {
+    let n = h.number;
+    work.git(&["fetch", "--quiet", "origin", &format!("refs/pull/{n}/head")])?;
+    let local = a.branch.clone().unwrap_or_else(|| match &h.branch {
+        Some(b) if !has_ref(work, &format!("refs/heads/{b}")) => b.clone(),
+        _ => format!("pr-{n}"),
+    });
+    work.git(&["switch", "--quiet", "-c", &local, "FETCH_HEAD"])?;
+    let (remote, merge) = match (&h.branch, &h.fork) {
+        (Some(b), Some((remote, url))) => {
+            work.git(&["remote", "add", remote, url])?;
+            // what `fetch` would record, without reaching the fork now
+            work.git(&[
+                "update-ref",
+                &format!("refs/remotes/{remote}/{b}"),
+                &h.commit,
+            ])?;
+            if &local != b {
+                // push the local branch to the PR's, whatever its name
+                work.git(&[
+                    "config",
+                    &format!("remote.{remote}.push"),
+                    &format!("refs/heads/{local}:refs/heads/{b}"),
+                ])?;
+            }
+            (remote.as_str(), format!("refs/heads/{b}"))
+        }
+        (Some(b), None) => ("origin", format!("refs/heads/{b}")),
+        (None, _) => ("origin", format!("refs/pull/{n}/head")),
+    };
+    work.git(&["config", &format!("branch.{local}.remote"), remote])?;
+    work.git(&["config", &format!("branch.{local}.merge"), &merge])?;
+    let target = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+    Ok(format!(
+        "#{n} on branch {local}, tracking {remote} {target}"
+    ))
+}
+
+/// `--rev`: a branch tracks the remote's, a tag or commit is detached; `-b`
+/// makes a branch there
+fn rev_branch(work: &Work, a: &CheckoutArgs) -> Result<String> {
+    let current = || {
+        work.git(&["symbolic-ref", "--short", "HEAD"])
+            .map(|b| format!("on branch {}", b.trim()))
+            .unwrap_or_else(|_| "detached".into())
+    };
+    match (&a.rev, &a.branch) {
+        (None, None) => {}
+        (None, Some(b)) => drop(work.git(&["switch", "--quiet", "-c", b])?),
+        (Some(r), b) => {
+            let remote_branch = has_ref(work, &format!("refs/remotes/origin/{r}"));
+            match (remote_branch, b) {
+                // an existing local branch, or one made tracking origin's
+                (true, None) => work.git(&["switch", "--quiet", r])?,
+                (true, Some(b)) => work.git(&[
+                    "switch",
+                    "--quiet",
+                    "-c",
+                    b,
+                    "--track",
+                    &format!("origin/{r}"),
+                ])?,
+                (false, None) => work.git(&["switch", "--quiet", "--detach", r])?,
+                (false, Some(b)) => work.git(&["switch", "--quiet", "-c", b, r])?,
+            };
+        }
+    }
+    Ok(current())
 }

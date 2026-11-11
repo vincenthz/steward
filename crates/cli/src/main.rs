@@ -35,7 +35,7 @@ enum Command {
     /// GitHub credentials
     #[command(subcommand)]
     Auth(AuthCmd),
-    /// The cache of bare repositories and their checkouts
+    /// The cache of bare repositories, and clones from it
     #[command(subcommand)]
     Repo(RepoCmd),
     /// Issues: list, read, triage, comment, label
@@ -66,20 +66,10 @@ pub enum RepoCmd {
         repos: Vec<RepoRef>,
     },
     /// The cached repositories
-    List {
-        /// with their checkouts
-        #[arg(short, long)]
-        verbose: bool,
-    },
-    /// Check a revision or a pull request out from the cache, as a worktree
+    List,
+    /// Clone a repository (a revision, a pull request) through the cache,
+    /// `origin` pointing to GitHub so that fetch, pull and push work as usual
     Checkout(CheckoutArgs),
-    /// Delete a checkout made by `repo checkout`
-    Discard {
-        path: PathBuf,
-        /// even with changes in it
-        #[arg(long)]
-        force: bool,
-    },
     /// Delete a repository from the cache
     Remove { repo: RepoRef },
 }
@@ -93,12 +83,12 @@ pub struct CheckoutArgs {
     /// the head of a pull request
     #[arg(long)]
     pub pr: Option<u64>,
-    /// create this branch at the revision rather than detaching HEAD
+    /// create this branch at the revision rather than detaching HEAD (for a
+    /// pull request: name its branch)
     #[arg(short, long)]
     pub branch: Option<String>,
-    /// where [default: in the cache's work directory]
-    #[arg(long)]
-    pub path: Option<PathBuf>,
+    /// where, absent or empty [default: ./NAME]
+    pub dir: Option<PathBuf>,
     /// use the cache as it is, without fetching
     #[arg(long)]
     pub offline: bool,

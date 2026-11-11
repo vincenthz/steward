@@ -34,6 +34,11 @@ impl RepoRef {
     pub fn clone_url(&self, host: &str) -> String {
         format!("https://{host}/{}/{}.git", self.owner, self.name)
     }
+
+    /// The ssh clone URL on `host`
+    pub fn ssh_url(&self, host: &str) -> String {
+        format!("git@{host}:{}/{}.git", self.owner, self.name)
+    }
 }
 
 fn valid_segment(s: &str) -> bool {

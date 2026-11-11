@@ -1,5 +1,6 @@
 //! `~/.config/steward/config.toml`, and where steward keeps things
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub github: Github,
+    pub git: Git,
     pub brain: Brain,
     pub cache: Cache,
     pub sandbox: Sandbox,
@@ -32,6 +34,21 @@ impl Default for Github {
             token: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Https,
+    Ssh,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Git {
+    /// how clones reach each host (`github.com`, an enterprise host...); a
+    /// host not listed: gh's `git_protocol`, else https
+    pub protocol: BTreeMap<String, Protocol>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,6 +113,11 @@ host = "github.com"
 # The token comes from $STEWARD_GITHUB_TOKEN, $GH_TOKEN or $GITHUB_TOKEN, then
 # from `gh auth login` (its hosts.yml or the system keyring).
 # token = ""
+
+[git.protocol]
+# how clones reach each host, https or ssh; a host not listed uses gh's
+# git_protocol, else https
+# "github.com" = "ssh"
 
 [brain]
 # a GGUF file or a model of the Hugging Face cache; by default the first downloaded of
@@ -165,16 +187,6 @@ impl Config {
             .unwrap_or_else(|| home().join(".cache/steward"))
     }
 
-    /// The bare repositories
-    pub fn git_dir(&self) -> PathBuf {
-        self.cache_dir().join("git")
-    }
-
-    /// The worktrees made by `repo checkout`
-    pub fn work_dir(&self) -> PathBuf {
-        self.cache_dir().join("work")
-    }
-
     /// The sandboxes' temporary directories
     pub fn sandbox_dir(&self) -> PathBuf {
         self.cache_dir().join("sandbox")
@@ -201,6 +213,13 @@ mod tests {
         assert_eq!(c.brain.effort, d.brain.effort);
         assert_eq!(c.brain.thinking_budget, d.brain.thinking_budget);
         assert!(!c.sandbox.network);
+    }
+
+    #[test]
+    fn protocols() {
+        let c: Config = toml::from_str("[git.protocol]\n\"github.com\" = \"ssh\"\n").unwrap();
+        assert_eq!(c.git.protocol.get("github.com"), Some(&Protocol::Ssh));
+        assert!(toml::from_str::<Config>("[git.protocol]\n\"x\" = \"ftp\"\n").is_err());
     }
 
     #[test]

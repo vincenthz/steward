@@ -55,8 +55,6 @@ pub fn config(ctx: &Ctx, c: ConfigCmd, path: &std::path::Path) -> Result {
             };
             println!("# {}{state}", path.display());
             println!("# cache:     {}", ctx.cfg.cache_dir().display());
-            println!("#   repos:   {}", ctx.cfg.git_dir().display());
-            println!("#   work:    {}", ctx.cfg.work_dir().display());
             println!("# api:       {}", ctx.cfg.api());
             println!();
             print!("{}", toml::to_string_pretty(&cfg)?);

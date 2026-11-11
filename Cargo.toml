@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+steward-brain = { path = "crates/brain" }
+steward-gitcache = { path = "crates/gitcache" }
+steward-github = { path = "crates/github" }
+steward-sandbox = { path = "crates/sandbox" }
+
+[profile.dev.package."*"]
+# unoptimized biv kernels make inference unusably slow in debug builds
+opt-level = 3
+
+[profile.release]
+lto = "thin"

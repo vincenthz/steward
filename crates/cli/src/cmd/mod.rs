@@ -1,3 +1,4 @@
+mod ai;
 mod github;
 mod repo;
 mod sandbox;
@@ -9,8 +10,8 @@ pub use github::{auth, issue, pr};
 pub use repo::repo;
 pub use sandbox::sandbox;
 
-use crate::config::{self, Config};
-use crate::ctx::Ctx;
+use steward_core::{Ctx, config};
+
 use crate::{ConfigCmd, Result};
 
 #[derive(Debug, Clone, Copy)]
@@ -44,10 +45,6 @@ pub fn text_arg(arg: &str) -> Result<String> {
 pub fn config(ctx: &Ctx, c: ConfigCmd, path: &std::path::Path) -> Result {
     match c {
         ConfigCmd::Show => {
-            let mut cfg: Config = ctx.cfg.clone();
-            if cfg.github.token.is_some() {
-                cfg.github.token = Some("<redacted>".into());
-            }
             let state = if path.is_file() {
                 ""
             } else {
@@ -57,17 +54,11 @@ pub fn config(ctx: &Ctx, c: ConfigCmd, path: &std::path::Path) -> Result {
             println!("# cache:     {}", ctx.cfg.cache_dir().display());
             println!("# api:       {}", ctx.cfg.api());
             println!();
-            print!("{}", toml::to_string_pretty(&cfg)?);
+            print!("{}", ctx.cfg.redacted().to_toml()?);
             Ok(())
         }
         ConfigCmd::Init => {
-            if path.exists() {
-                return Err(format!("{} exists already", path.display()).into());
-            }
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            std::fs::write(path, config::TEMPLATE)?;
+            config::init(path)?;
             println!("wrote {}", path.display());
             Ok(())
         }

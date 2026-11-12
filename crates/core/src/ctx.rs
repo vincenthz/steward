@@ -1,11 +1,14 @@
 //! What the commands share: the configuration, the GitHub client, the cache
 
 use std::cell::OnceCell;
+use std::path::{Path, PathBuf};
 
 use steward_gitcache::{Auth, Cache, Remote};
 use steward_github::{Client, RepoRef, Token, auth};
+use steward_sandbox::{Policy, Sandbox};
 
-use crate::config::{Config, Protocol};
+use crate::Result;
+use crate::config::{Config, Protocol, expand};
 
 pub struct Ctx {
     pub cfg: Config,
@@ -70,5 +73,24 @@ impl Ctx {
             key: self.key(repo),
             auth: self.git_auth(),
         }
+    }
+
+    /// The sandbox for commands working in `dir`: the configured policy, and
+    /// these additions
+    pub fn sandbox(
+        &self,
+        dir: &Path,
+        network: bool,
+        writable: &[PathBuf],
+        env: &[String],
+    ) -> Result<Sandbox> {
+        let s = &self.cfg.sandbox;
+        let mut p = Policy::workdir(dir);
+        p.network = network || s.network;
+        p.writable
+            .extend(s.writable.iter().chain(writable).map(|w| expand(w)));
+        p.hidden.extend(s.hide.iter().map(|h| expand(h)));
+        p.pass_env.extend(s.pass_env.iter().chain(env).cloned());
+        Ok(Sandbox::new(p, &self.cfg.sandbox_dir())?)
     }
 }

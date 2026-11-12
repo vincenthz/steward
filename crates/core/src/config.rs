@@ -169,7 +169,22 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Writes the commented [`TEMPLATE`] to `path`, unless a file is there
+pub fn init(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} exists already", path.display()),
+        ));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, TEMPLATE)
+}
+
 impl Config {
+    /// The configuration in `path`, the defaults if there is no file
     pub fn load(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
@@ -190,6 +205,19 @@ impl Config {
     /// The sandboxes' temporary directories
     pub fn sandbox_dir(&self) -> PathBuf {
         self.cache_dir().join("sandbox")
+    }
+
+    /// The configuration with its secrets (the token) replaced, to show
+    pub fn redacted(&self) -> Config {
+        let mut cfg = self.clone();
+        if cfg.github.token.is_some() {
+            cfg.github.token = Some("<redacted>".into());
+        }
+        cfg
+    }
+
+    pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
+        toml::to_string_pretty(self)
     }
 
     pub fn api(&self) -> String {

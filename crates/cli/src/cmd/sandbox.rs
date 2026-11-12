@@ -1,31 +1,10 @@
-use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use steward_sandbox::{Policy, Sandbox, detect};
+use steward_core::Ctx;
+use steward_sandbox::detect;
 
-use crate::config::expand;
-use crate::ctx::Ctx;
 use crate::{Result, SandboxCmd, SandboxRunArgs};
-
-/// The sandbox for commands working in `dir`, from the configuration and
-/// the command's additions
-pub fn make_sandbox(
-    ctx: &Ctx,
-    dir: &Path,
-    network: bool,
-    writable: &[std::path::PathBuf],
-    env: &[String],
-) -> Result<Sandbox> {
-    let s = &ctx.cfg.sandbox;
-    let mut p = Policy::workdir(dir);
-    p.network = network || s.network;
-    p.writable
-        .extend(s.writable.iter().chain(writable).map(|w| expand(w)));
-    p.hidden.extend(s.hide.iter().map(|h| expand(h)));
-    p.pass_env.extend(s.pass_env.iter().chain(env).cloned());
-    Ok(Sandbox::new(p, &ctx.cfg.sandbox_dir())?)
-}
 
 pub fn sandbox(ctx: &Ctx, c: SandboxCmd) -> Result {
     match c {
@@ -35,7 +14,7 @@ pub fn sandbox(ctx: &Ctx, c: SandboxCmd) -> Result {
                 return Ok(());
             };
             println!("backend   {backend}");
-            let sb = make_sandbox(ctx, &dir, false, &[], &[])?;
+            let sb = ctx.sandbox(&dir, false, &[], &[])?;
             let p = sb.policy();
             println!("network   {}", if p.network { "allowed" } else { "denied" });
             for w in &p.writable {
@@ -55,7 +34,7 @@ pub fn sandbox(ctx: &Ctx, c: SandboxCmd) -> Result {
 }
 
 fn run(ctx: &Ctx, a: SandboxRunArgs) -> Result {
-    let sb = make_sandbox(ctx, &a.dir, a.net, &a.write, &a.env)?;
+    let sb = ctx.sandbox(&a.dir, a.net, &a.write, &a.env)?;
     let (program, args) = a.command.split_first().expect("clap requires a command");
     let mut cmd: Command = sb.command(program, args, &a.dir);
     let mut child = cmd.spawn()?;

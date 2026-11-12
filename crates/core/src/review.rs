@@ -1,12 +1,11 @@
-//! `steward pr review`: a review of a pull request's diff
+//! Review: a review of a pull request's diff, with the model
 
 use steward_github::types::PullRequest;
 use steward_github::{ItemRef, ReviewEvent};
 
-use super::{Monitor, fit, material_budget, with_brain};
-use crate::ctx::Ctx;
+use crate::ai::{Event, Observer, Options, Usage, fit, material_budget, with_brain};
 use crate::text::fence;
-use crate::{AiArgs, Result};
+use crate::{Ctx, Result};
 
 const INSTRUCTIONS: &str = "\
 You are steward, reviewing a pull request as a careful senior maintainer of the \
@@ -108,9 +107,49 @@ fn header(p: &PullRequest) -> String {
     )
 }
 
-pub fn run(ctx: &Ctx, item: &ItemRef, post: bool, args: &AiArgs) -> Result {
+/// A review of a pull request, written by the model
+#[derive(Debug)]
+pub struct Review {
+    pub item: ItemRef,
+    pub pull: PullRequest,
+    /// the review, in Markdown
+    pub text: String,
+    /// the model that wrote it
+    pub model: String,
+    /// files left out of the diff: generated, vendored, lockfiles
+    pub skipped: Vec<String>,
+    /// the diff was cut to fit: (lines shown, lines in all)
+    pub clipped: Option<(usize, usize)>,
+    pub usage: Usage,
+}
+
+impl Review {
+    /// The review as posted: the text, and a footer saying who wrote it
+    pub fn body(&self) -> String {
+        format!(
+            "{}\n\n---\n<sub>Review written by steward \
+             with {}, a model running locally. It can be wrong: weigh it accordingly.</sub>",
+            self.text, self.model
+        )
+    }
+
+    /// Posts the review on the pull request, as a comment (never an
+    /// approval); its URL
+    pub fn post(&self, ctx: &Ctx) -> Result<String> {
+        let r = ctx.github().create_review(
+            &self.item,
+            &self.pull.head.sha,
+            &self.body(),
+            ReviewEvent::Comment,
+        )?;
+        Ok(r.html_url)
+    }
+}
+
+/// Reviews a pull request with the model; nothing is written to GitHub
+pub fn review(ctx: &Ctx, item: &ItemRef, opts: &Options, on: Observer<'_>) -> Result<Review> {
     let gh = ctx.github();
-    let pr = gh.pull(item)?;
+    let pull = gh.pull(item)?;
     let raw = gh.pull_diff(item)?;
     let (diff, skipped) = filter_diff(&raw);
     if diff.trim().is_empty() {
@@ -118,11 +157,11 @@ pub fn run(ctx: &Ctx, item: &ItemRef, post: bool, args: &AiArgs) -> Result {
     }
     let max_tokens = ctx.cfg.brain.max_tokens;
 
-    let (review, model) = with_brain(ctx, args, |brain| {
+    let (text, model, clipped, usage) = with_brain(ctx, opts, on, |brain, on| {
         let budget = material_budget(brain, max_tokens);
-        let description = pr.body.as_deref().unwrap_or("(no description)");
+        let description = pull.body.as_deref().unwrap_or("(no description)");
         let (description, _) = fit(brain, description, budget / 8);
-        let mut prompt = header(&pr);
+        let mut prompt = header(&pull);
         prompt.push('\n');
         prompt.push_str(&fence("description", "", description));
         prompt.push_str("\n\n");
@@ -135,6 +174,7 @@ pub fn run(ctx: &Ctx, item: &ItemRef, post: bool, args: &AiArgs) -> Result {
                 skipped.join(", ")
             ));
         }
+        let mut clipped = None;
         if cut {
             let total = diff.lines().count();
             let seen = shown.lines().count();
@@ -142,37 +182,29 @@ pub fn run(ctx: &Ctx, item: &ItemRef, post: bool, args: &AiArgs) -> Result {
                 "\n\n(The diff was cut to fit: {seen} of its {total} lines are shown. Review \
                  what is shown, and say in the summary that the rest was not reviewed.)"
             ));
-            eprintln!("the diff is too long: reviewing {seen} of {total} lines");
+            on(Event::Clipped {
+                what: "diff",
+                shown: seen,
+                total,
+            });
+            clipped = Some((seen, total));
         }
-        let mut monitor = Monitor::new(args.verbose);
-        let result = brain.ask(INSTRUCTIONS, &prompt, &mut |p| monitor.observe(p));
-        monitor.done();
-        let reply = result?;
-        eprintln!(
-            "{} prompt tokens, {} generated, {:.1}s",
-            reply.prompt_tokens,
-            reply.generated_tokens,
-            reply.elapsed.as_secs_f32()
-        );
-        if reply.truncated {
-            eprintln!("warning: the answer hit the token limit (brain.max_tokens)");
-        }
+        let reply = brain.ask(INSTRUCTIONS, &prompt, &mut |p| on(Event::Model(p)))?;
         if reply.text.is_empty() {
             return Err("the model wrote no review".into());
         }
-        Ok((reply.text, brain.name().to_string()))
+        let usage = Usage::from(&reply);
+        Ok((reply.text, brain.name().to_string(), clipped, usage))
     })?;
-
-    println!("{review}");
-    if post {
-        let body = format!(
-            "{review}\n\n---\n<sub>Review written by steward \
-             with {model}, a model running locally. It can be wrong: weigh it accordingly.</sub>"
-        );
-        let r = gh.create_review(item, &pr.head.sha, &body, ReviewEvent::Comment)?;
-        eprintln!("posted {}", r.html_url);
-    }
-    Ok(())
+    Ok(Review {
+        item: item.clone(),
+        pull,
+        text,
+        model,
+        skipped,
+        clipped,
+        usage,
+    })
 }
 
 #[cfg(test)]

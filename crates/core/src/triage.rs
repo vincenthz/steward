@@ -1,14 +1,13 @@
-//! `steward issue triage`: the kind of an issue, its priority, its labels
+//! Triage: the kind of an issue, its priority, its labels, with the model
 
 use serde::Serialize;
 use steward_brain::{Arguments, Tool};
 use steward_github::ItemRef;
 use steward_github::types::{Comment, Issue, Label, Repository};
 
-use super::{Monitor, fit, material_budget, with_brain};
-use crate::ctx::Ctx;
+use crate::ai::{Event, Observer, Options, Usage, fit, material_budget, with_brain};
 use crate::text::fence;
-use crate::{AiArgs, Result};
+use crate::{Ctx, Result};
 
 pub const KINDS: &[&str] = &[
     "bug", "feature", "question", "docs", "chore", "support", "invalid",
@@ -81,8 +80,36 @@ pub struct Triage {
     pub rationale: String,
     pub missing: Option<String>,
     pub next_step: String,
-    /// labels added by `--apply`
+    /// labels added by [`Triaged::apply`]
     pub applied: Vec<String>,
+}
+
+/// An issue, and its triage
+#[derive(Debug)]
+pub struct Triaged {
+    pub item: ItemRef,
+    pub issue: Issue,
+    pub triage: Triage,
+    pub usage: Usage,
+}
+
+impl Triaged {
+    /// Adds the chosen labels the issue doesn't have yet (never removes any),
+    /// recording them in `triage.applied`
+    pub fn apply(&mut self, ctx: &Ctx) -> Result<&[String]> {
+        let new: Vec<String> = self
+            .triage
+            .labels
+            .iter()
+            .filter(|l| !self.issue.labels.iter().any(|c| &c.name == *l))
+            .cloned()
+            .collect();
+        if !new.is_empty() {
+            self.issue.labels = ctx.github().add_labels(&self.item, &new)?;
+        }
+        self.triage.applied = new;
+        Ok(&self.triage.applied)
+    }
 }
 
 /// The prompt: the repository's labels, the issue, its comments
@@ -170,11 +197,12 @@ fn match_labels(chosen: &[String], labels: &[Label]) -> (Vec<String>, Vec<String
     (known, unknown)
 }
 
-pub fn run(ctx: &Ctx, item: &ItemRef, apply: bool, json: bool, args: &AiArgs) -> Result {
+/// Triages an issue with the model; nothing is written to GitHub
+pub fn triage(ctx: &Ctx, item: &ItemRef, opts: &Options, on: Observer<'_>) -> Result<Triaged> {
     let gh = ctx.github();
     let issue = gh.issue(item)?;
     if issue.is_pull_request() {
-        return Err(format!("{item} is a pull request: use `steward pr review`").into());
+        return Err(format!("{item} is a pull request, not an issue: review it instead").into());
     }
     let repo = gh.repository(&item.repo)?;
     let labels = gh.labels(&item.repo)?;
@@ -185,26 +213,18 @@ pub fn run(ctx: &Ctx, item: &ItemRef, apply: bool, json: bool, args: &AiArgs) ->
     };
     let max_tokens = ctx.cfg.brain.max_tokens;
 
-    let mut triage = with_brain(ctx, args, |brain| {
+    let (triage, usage) = with_brain(ctx, opts, on, |brain, on| {
         let budget = material_budget(brain, max_tokens).saturating_sub(labels.len() * 24);
         let mut fitter = |t: &str| {
             let (s, cut) = fit(brain, t, budget);
             (s.to_string(), cut)
         };
         let prompt = prompt(&repo, &labels, &issue, &comments, &mut fitter);
-        let mut monitor = Monitor::new(args.verbose);
-        let result = brain.call(INSTRUCTIONS, &prompt, &tool(), &mut |p| monitor.observe(p));
-        monitor.done();
-        let (call, reply) = result?;
-        eprintln!(
-            "{} prompt tokens, {} generated, {:.1}s",
-            reply.prompt_tokens,
-            reply.generated_tokens,
-            reply.elapsed.as_secs_f32()
-        );
+        let (call, reply) =
+            brain.call(INSTRUCTIONS, &prompt, &tool(), &mut |p| on(Event::Model(p)))?;
         let (known, unknown) = match_labels(&call.list("labels"), &labels);
         let field = |n: &str| call.arg(n).unwrap_or("").trim().to_string();
-        Ok(Triage {
+        let triage = Triage {
             item: item.to_string(),
             kind: field("kind"),
             priority: field("priority"),
@@ -216,59 +236,15 @@ pub fn run(ctx: &Ctx, item: &ItemRef, apply: bool, json: bool, args: &AiArgs) ->
                 .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("none")),
             next_step: field("next_step"),
             applied: Vec::new(),
-        })
+        };
+        Ok((triage, Usage::from(&reply)))
     })?;
-
-    if apply {
-        let new: Vec<String> = triage
-            .labels
-            .iter()
-            .filter(|l| !issue.labels.iter().any(|c| &c.name == *l))
-            .cloned()
-            .collect();
-        if !new.is_empty() {
-            gh.add_labels(item, &new)?;
-        }
-        triage.applied = new;
-    }
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&triage)?);
-        return Ok(());
-    }
-    println!("{item}  {}", issue.title);
-    println!("  kind      {}", triage.kind);
-    println!("  priority  {}", triage.priority);
-    println!(
-        "  labels    {}",
-        if triage.labels.is_empty() {
-            "(none)".to_string()
-        } else {
-            triage.labels.join(", ")
-        }
-    );
-    if !triage.unknown_labels.is_empty() {
-        println!(
-            "            ignored, not labels of the repository: {}",
-            triage.unknown_labels.join(", ")
-        );
-    }
-    println!("  summary   {}", triage.summary);
-    println!("  why       {}", triage.rationale);
-    if let Some(m) = &triage.missing {
-        println!("  missing   {m}");
-    }
-    println!("  next      {}", triage.next_step);
-    if apply {
-        if triage.applied.is_empty() {
-            println!("no label to add");
-        } else {
-            println!("added {}", triage.applied.join(", "));
-        }
-    } else if !triage.labels.is_empty() {
-        println!("(--apply adds the labels)");
-    }
-    Ok(())
+    Ok(Triaged {
+        item: item.clone(),
+        issue,
+        triage,
+        usage,
+    })
 }
 
 #[cfg(test)]

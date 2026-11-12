@@ -1,0 +1,14 @@
+[package]
+name = "steward-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.1"
+steward-brain.workspace = true
+steward-gitcache.workspace = true
+steward-github.workspace = true
+steward-sandbox.workspace = true

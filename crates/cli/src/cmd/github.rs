@@ -3,10 +3,11 @@
 use steward_github::types::{Issue, Label};
 use steward_github::{IssueFilter, auth};
 
-use super::text_arg;
-use crate::ctx::Ctx;
-use crate::text::{ago, truncate};
-use crate::{AuthCmd, IssueCmd, PrCmd, Result, ai};
+use steward_core::Ctx;
+use steward_core::text::{ago, truncate};
+
+use super::{ai, text_arg};
+use crate::{AuthCmd, IssueCmd, PrCmd, Result};
 
 pub fn auth(ctx: &Ctx, c: AuthCmd) -> Result {
     match c {
@@ -141,7 +142,7 @@ pub fn issue(ctx: &Ctx, c: IssueCmd) -> Result {
             apply,
             json,
             ai,
-        } => ai::triage::run(ctx, &item, apply, json, &ai),
+        } => ai::triage(ctx, &item, apply, json, &ai),
         IssueCmd::Comment { item, body } => {
             let body = text_arg(&body)?;
             if body.trim().is_empty() {
@@ -235,7 +236,7 @@ pub fn pr(ctx: &Ctx, c: PrCmd) -> Result {
             }
             Ok(())
         }
-        PrCmd::Review { item, post, ai } => ai::review::run(ctx, &item, post, &ai),
+        PrCmd::Review { item, post, ai } => ai::review(ctx, &item, post, &ai),
         PrCmd::Create {
             repo,
             head,

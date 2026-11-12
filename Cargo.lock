@@ -820,13 +820,11 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
- "serde",
  "serde_json",
  "steward-brain",
- "steward-gitcache",
+ "steward-core",
  "steward-github",
  "steward-sandbox",
- "toml",
 ]
 
 [[package]]
@@ -836,6 +834,18 @@ dependencies = [
  "biv",
  "biv-cli",
  "serde_json",
+]
+
+[[package]]
+name = "steward-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "steward-brain",
+ "steward-gitcache",
+ "steward-github",
+ "steward-sandbox",
+ "toml",
 ]
 
 [[package]]

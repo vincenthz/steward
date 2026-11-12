@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 steward-brain = { path = "crates/brain" }
+steward-core = { path = "crates/core" }
 steward-gitcache = { path = "crates/gitcache" }
 steward-github = { path = "crates/github" }
 steward-sandbox = { path = "crates/sandbox" }

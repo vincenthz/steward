@@ -53,7 +53,8 @@ them together:
 | `steward-gitcache` | bare clones at `<cache>/<host>/<owner>/<name>` mirroring branches and tags, PR heads fetched on demand to `refs/pull/N/head`; local clones and worktrees from them. Clones land atomically (cloned aside, then renamed), a file lock serializes processes per repository, git never prompts, and the token goes to git through `GIT_CONFIG_*` environment variables: never on the command line or in the repository's config. |
 | `steward-sandbox` | Seatbelt (`sandbox-exec`) on macOS, bubblewrap on Linux. Default policy: writes only to the working directory and a private `$TMPDIR`; no IP network; `~/.ssh`, `~/.config/gh`, cloud and registry credentials, keychains unreadable; the environment cleared to a basic set (so `GH_TOKEN` and friends never reach the command). Captured runs have a timeout that kills the whole process group. |
 | `steward-brain` | biv behind a small API: `with_brain(cfg, \|brain\| ...)` loads the model once; `ask` (text), `call` (the answer as a function call, for structure, reminded once if the model doesn't call), `conversation` (multi-turn, tool results: the base for agent loops). A thinking budget stops runaway reasoning and asks for the answer with thinking off. |
-| `steward` | the commands, the config (`~/.config/steward/config.toml`), the prompts. |
+| `steward-core` | what the commands do, as a library: the config (`~/.config/steward/config.toml`), `Ctx` (the GitHub client, the cache, the sandbox policy), checkouts through the cache, triage and review with their prompts. Nothing prints: operations return their results, model progress goes to an observer, and outward actions (`Triaged::apply`, `Review::post`) are separate calls. |
+| `steward` | the command line on steward-core: arguments, output, progress on stderr. |
 
 Principles kept so far:
 

@@ -1,20 +1,19 @@
 //! steward: the operational work around software projects, on the command
 //! line. GitHub through its API, repositories in a local cache, commands in
 //! a sandbox, and a local model (biv) for what needs judgment.
+//!
+//! The work is done by steward-core; this is the arguments and the output.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use steward_core::{Ctx, config};
 use steward_github::{ItemRef, RepoRef};
 
-mod ai;
 mod cmd;
-mod config;
-mod ctx;
-mod text;
 
-pub type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+pub use steward_core::Result;
 
 #[derive(Parser)]
 #[command(
@@ -102,6 +101,14 @@ pub struct AiArgs {
     /// the model, instead of the configured one
     #[arg(short, long)]
     pub model: Option<String>,
+}
+
+impl AiArgs {
+    pub fn options(&self) -> steward_core::ai::Options {
+        steward_core::ai::Options {
+            model: self.model.clone(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -247,7 +254,7 @@ fn main() -> ExitCode {
     let path = cli.config.clone().unwrap_or_else(config::config_file);
     let result = config::Config::load(&path)
         .map_err(Into::into)
-        .and_then(|cfg| run(cli.command, ctx::Ctx::new(cfg), &path));
+        .and_then(|cfg| run(cli.command, Ctx::new(cfg), &path));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -257,7 +264,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(command: Command, ctx: ctx::Ctx, config_path: &std::path::Path) -> Result {
+fn run(command: Command, ctx: Ctx, config_path: &std::path::Path) -> Result {
     match command {
         Command::Auth(c) => cmd::auth(&ctx, c),
         Command::Repo(c) => cmd::repo(&ctx, c),
